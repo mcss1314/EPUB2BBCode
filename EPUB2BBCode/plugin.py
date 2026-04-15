@@ -509,16 +509,23 @@ class MainDialog(QtWidgets.QDialog):
         self.img_items = []
 
         try:
+            # 提取图片并按文件名进行字母顺序排序，方便用户核对
+            img_list = []
             for info in self.bk.image_iter():
                 iid = info[0]
                 href = info[1] if len(info) > 1 and info[1] else ""
                 name = os.path.basename(href or iid)
-                
+                img_list.append((name, iid))
+            
+            img_list.sort(key=lambda x: x[0])
+
+            for name, iid in img_list:
                 row = QtWidgets.QHBoxLayout()
                 row.setContentsMargins(5, 5, 5, 5)
                 
                 chk = RedXCheckBox()
                 
+                # 恢复为标准 QLabel，不再响应双击放大操作
                 img_lbl = QtWidgets.QLabel()
                 img_lbl.setFixedSize(80, 80)
                 img_lbl.setStyleSheet("border: 1px solid #ddd; background: #f9f9f9;")
@@ -527,9 +534,10 @@ class MainDialog(QtWidgets.QDialog):
                     pix = QtGui.QPixmap()
                     pix.loadFromData(self.bk.readfile(iid))
                     img_lbl.setPixmap(pix.scaled(80, 80, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
-                except: img_lbl.setText("ERR")
+                except: 
+                    img_lbl.setText("ERR")
                 
-                # 【修改】文件名称宽度改为目前的四分之三 (约176px)，取消换行，双击弹窗
+                # 【保留】文件名称宽度仍为目前的四分之三 (约176px)，取消换行，双击弹窗
                 lbl_name = ClickableFilenameLabel(name)
                 lbl_name.setFixedWidth(176)
                 lbl_name.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
@@ -538,7 +546,7 @@ class MainDialog(QtWidgets.QDialog):
                 edit.setPlaceholderText("粘贴 URL...")
                 edit.setFixedHeight(30) 
                 
-                # 【修改】调换顺序：选项 -> 图片 -> 文件名 -> 链接输入框
+                # 调换顺序：选项 -> 图片 -> 文件名 -> 链接输入框
                 row.addWidget(chk)
                 row.addWidget(img_lbl)
                 row.addWidget(lbl_name)
@@ -739,6 +747,12 @@ class MainDialog(QtWidgets.QDialog):
 
             # 【恢复保护】将被保护的 <br/> 还原为全角空格 (放在最后，避免被上方引擎当做无用空行误杀)
             final = final.replace('[SYS_BR_SPACE]', '　')
+
+            # 【清理重复的图片标签】将 [img][img] 替换为 [img]，以及 [/img][/img] 替换为 [/img]
+            while '[img][img]' in final:
+                final = final.replace('[img][img]', '[img]')
+            while '[/img][/img]' in final:
+                final = final.replace('[/img][/img]', '[/img]')
 
             print("\n【✅ 转换彻底完成】控制台报告已输出完毕。")
             
