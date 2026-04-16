@@ -58,7 +58,7 @@ class BBCodeConverter:
         title = title.strip(' \t\n\r\u3000')
         
         # 【特权】封面处理：仅忽略标题匹配，保留页面正常内容处理
-        if title in ["書封", "书封", "封面", "作者頁", "作者页", "書名頁", "书名页", "內彩", "封底"]:
+        if title in ["書封", "书封", "封面", "作者頁", "作者页", "書名頁", "书名页", "內彩", "封底", "彩頁", "彩页"]:
             print(f"  -> [识别-忽略] 发现封面标题: '{title}'，不将其纳入匹配库（但保留页面正文读取）")
             return
             
@@ -299,6 +299,9 @@ class BBCodeConverter:
         html, i_count = re.subn(r'<(?:img|image)[^>]+(?:src|href)=["\']([^"\']+)["\'][^>]*>', img_repl, html, flags=re.I)
         if i_count > 0: print(f"  [处理-图片] 成功映射了 {i_count} 张图片。")
 
+        # 将各种形式的分割线 <hr> 转换为 [hr]
+        html = re.sub(r'<hr[^>]*>', '[hr]', html, flags=re.I)
+
         # 【深度递归修复】解决标签嵌套导致提前闭合的恶性Bug
         # 从最内层标签开始向外逐层剥离或替换，完美支持 <span class="gfont">1<span>2</span>3</span> 及其内层样式
         while True:
@@ -331,7 +334,7 @@ class BBCodeConverter:
         # ========================================================
         # 7. 剥离块级标签，转化为真实行
         # ========================================================
-        html = re.sub(r'</p>|</div>|</li>|</h[1-6]>|<br\s*/?>', '\n', html, flags=re.I)
+        html = re.sub(r'</p>|</li>|</h[1-6]>|<br\s*/?>', '\n', html, flags=re.I)
         text = re.sub(r'<[^>]+>', '', html)
 
         # ========================================================
