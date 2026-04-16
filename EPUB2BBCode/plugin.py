@@ -299,8 +299,8 @@ class BBCodeConverter:
         html, i_count = re.subn(r'<(?:img|image)[^>]+(?:src|href)=["\']([^"\']+)["\'][^>]*>', img_repl, html, flags=re.I)
         if i_count > 0: print(f"  [处理-图片] 成功映射了 {i_count} 张图片。")
 
-        # 将各种形式的分割线 <hr> 转换为 [hr]
-        html = re.sub(r'<hr[^>]*>', '[hr]', html, flags=re.I)
+        # 【独立保护】将分割线单独提取并加保护，强制换行，确保其绝对独立为一行
+        html = re.sub(r'<hr[^>]*>', '\n[SYS_HR_MARKER]\n', html, flags=re.I)
 
         # 【深度递归修复】解决标签嵌套导致提前闭合的恶性Bug
         # 从最内层标签开始向外逐层剥离或替换，完美支持 <span class="gfont">1<span>2</span>3</span> 及其内层样式
@@ -350,8 +350,8 @@ class BBCodeConverter:
                 marked_lines.append(line)
                 continue
 
-            # 遇到受沙盒保护的分行符，直接放行，杜绝被误判为标题
-            if '[segmentation]' in stripped_line:
+            # 遇到受沙盒保护的分行符或分割线，直接放行，杜绝被误判为标题
+            if '[segmentation]' in stripped_line or '[SYS_HR_MARKER]' in stripped_line:
                 marked_lines.append(line)
                 continue
 
@@ -750,6 +750,10 @@ class MainDialog(QtWidgets.QDialog):
 
             # 【恢复保护】将被保护的 <br/> 还原为全角空格 (放在最后，避免被上方引擎当做无用空行误杀)
             final = final.replace('[SYS_BR_SPACE]', '　')
+
+            # 【恢复分割线】解除分割线的独立保护机制，强制消除因块级标签堆叠产生的异常空行
+            final = re.sub(r'\n*\[SYS_HR_MARKER\]\n*', '\n[hr]\n', final)
+            final = final.replace('[SYS_HR_MARKER]', '[hr]') # 兜底防漏替换
 
             # 【清理重复的图片标签】将 [img][img] 替换为 [img]，以及 [/img][/img] 替换为 [/img]
             while '[img][img]' in final:
