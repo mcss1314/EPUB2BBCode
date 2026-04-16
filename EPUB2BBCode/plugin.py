@@ -185,7 +185,7 @@ class BBCodeConverter:
         for m in a_tags:
             link_pos = m.start()
             target_id = m.group(1)
-            a_text_raw = re.sub(r'<[^>]+>', '', m.group(2)).strip(' \t\n\r\u3000[]()【】')
+            a_text_raw = re.sub(r'<[^>]+>'， '', m.group(2)).strip(' \t\n\r\u3000[]()【】')
             
             # 判断是否是注释链接
             if '注' in a_text_raw or '註' in a_text_raw or '*' in a_text_raw or a_text_raw.isdigit():
@@ -264,15 +264,8 @@ class BBCodeConverter:
             html = new_html
 
         # ========================================================
-        # 4. 保护分行符 (start-6em)
+        # 4. 保护分行符 (start-6em) - 【已重构合并至第6步的统一多阶引擎】
         # ========================================================
-        def mask_div(m):
-            txt = re.sub(r'<[^>]+>', '', m.group(1)).strip(' \t\n\r\u3000')
-            txt = re.sub(r'\s+', ' ', txt) # 强制扁平化，防止内部污染
-            # 必须包裹在原有的 <p> 标签内，确保它在后续剥离标签时能正常换行
-            return f'<p class="start-6em">[segmentation]{txt}[/segmentation]</p>'
-        html, d_count = re.subn(r'<p[^>]+class=["\'][^"\']*start-6em[^"\']*["\'][^>]*>(.*?)</p>', mask_div, html, flags=re.S | re.I)
-        if d_count > 0: print(f"  [保护-分行符] 成功掩护了 {d_count} 个 start-6em 标签。")
 
         # ========================================================
         # 5. Ruby 处理 (严格保留正文空格)
@@ -302,39 +295,62 @@ class BBCodeConverter:
         # 【独立保护】将分割线单独提取并加保护，强制换行，确保其绝对独立为一行
         html = re.sub(r'<hr[^>]*>', '\n[SYS_HR_MARKER]\n', html, flags=re.I)
 
-        # 【深度递归修复】解决标签嵌套导致提前闭合的恶性Bug
-        # 从最内层标签开始向外逐层剥离或替换，完美支持 <span class="gfont">1<span>2</span>3</span> 及其内层样式
+        # 【多阶样式统一引擎】
+        # 统一处理居中、居左、居右、加粗、斜体、删除线、分行符，完美支持同一class多属性无冲突叠加
         while True:
-            # (?![^>]*?<(?:span|b|strong|i|em|s)\b) 确保我们定位到的是没有内部重叠标签的最内层标签
-            m = re.search(r'<(span|b|strong|i|em|s)\b([^>]*)>((?:(?!<(?:span|b|strong|i|em|s)\b).)*?)</\1>', html, flags=re.S|re.I)
+            # 确保我们定位到的是没有内部重叠标签的最内层目标标签
+            m = re.search(r'<(span|b|strong|i|em|s|p|div|h[1-6])\b([^>]*)>((?:(?!</?(?:span|b|strong|i|em|s|p|div|h[1-6])\b).)*?)</\1>', html, flags=re.S|re.I)
             if not m: break
             
             tag = m.group(1).lower()
             attrs = m.group(2).lower()
             inner = m.group(3)
             
-            if tag in ('b', 'strong'):
-                repl = f"[b]{inner}[/b]"
-            elif tag in ('i', 'em'):
-                repl = f"[i]{inner}[/i]"
-            elif tag == 's':
-                repl = f"[s]{inner}[/s]"
-            elif tag == 'span':
-                if 'bold' in attrs or 'gfont' in attrs:
-                    repl = f"[b]{inner}[/b]"
-                elif 'italic' in attrs:
-                    repl = f"[i]{inner}[/i]"
-                else:
-                    repl = inner  # 剥离无意义外壳，保留内容供外层处理
-            else:
-                repl = inner
+            repl = inner
             
-            html = html[:m.start()] + repl + html[m.end():]
+            # 1. 处理基于标签的默认样式
+            if tag in ('b', 'strong'):
+                repl = f"[b]{repl}[/b]"
+            elif tag in ('i', 'em'):
+                repl = f"[i]{repl}[/i]"
+            elif tag == 's':
+                repl = f"[s]{repl}[/s]"
+                
+            # 2. 处理基于 class 的叠加样式 (正则精准单词边界匹配防止误伤)
+            if re.search(r'\b(bold|gfont)\b', attrs):
+                repl = f"[b]{repl}[/b]"
+            if re.search(r'\bitalic\b', attrs):
+                repl = f"[i]{repl}[/i]"
+            if re.search(r'\b(line-through|strike)\b', attrs):
+                repl = f"[s]{repl}[/s]"
+            if re.search(r'\balign-center\b', attrs):
+                repl = f"[center]{repl}[/center]"
+            if re.search(r'\b(align-left|align-start)\b', attrs):
+                repl = f"[left]{repl}[/left]"
+            if re.search(r'\b(align-right|align-end)\b', attrs):
+                repl = f"[right]{repl}[/right]"
+                
+            # 3. 分行符特殊保护与合并
+            if re.search(r'\bstart-6em\b', attrs):
+                # 剔除内部残留的任何纯HTML标签(保留已生成的BBCode)，并扁平化空白，符合原始防污染设计
+                repl = re.sub(r'<[^>]+>', '', repl).strip(' \t\n\r\u3000')
+                repl = re.sub(r'\s+', ' ', repl)
+                repl = f"[segmentation]{repl}[/segmentation]"
+
+            # 4. 根据标签类型决定是剥离外壳，还是安全更名保留
+            if tag in ('p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+                # 块级标签强制更名为 sys_xxx，防止死循环并移交至 Step 7 进行绝对准确的换行处理
+                html = html[:m.start()] + f"<sys_{tag}>{repl}</sys_{tag}>" + html[m.end():]
+            else:
+                # 行内标签由于不涉及换行，直接剥离其外壳
+                html = html[:m.start()] + repl + html[m.end():]
 
         # ========================================================
         # 7. 剥离块级标签，转化为真实行
         # ========================================================
-        html = re.sub(r'</p>|</li>|</h[1-6]>|<br\s*/?>', '\n', html, flags=re.I)
+        # 注意：此处自动读取已被引擎重命名的 sys_p 与 sys_h 系列
+        # 遵守之前的指令，刻意不将 </sys_div> 视为换行符，避免无谓的空行增生
+        html = re.sub(r'</sys_p>|</sys_h[1-6]>|</li>|<br\s*/?>', '\n', html, flags=re.I)
         text = re.sub(r'<[^>]+>', '', html)
 
         # ========================================================
