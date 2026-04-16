@@ -495,7 +495,7 @@ class MainDialog(QtWidgets.QDialog):
 
     def init_ui(self):
         self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowContextHelpButtonHint)
-        self.setWindowTitle("EPUB → BBCode TXT (多核引擎预编译提速版)")
+        self.setWindowTitle("EPUB → BBCode TXT Ver1.1.5")
         self.resize(950, 850)
         self.layout = QtWidgets.QVBoxLayout(self)
         self.stack = QtWidgets.QStackedWidget()
@@ -521,12 +521,12 @@ class MainDialog(QtWidgets.QDialog):
         p1_layout.addWidget(QtWidgets.QLabel("步骤 1: 制作信息配置"))
         p1_layout.addWidget(self.text_edit)
         
-        self.chk_process_hr = QtWidgets.QCheckBox("转换分割线(<hr>→[hr])")
+        self.chk_process_hr = QtWidgets.QCheckBox("转换<hr>标签")
         self.chk_process_hr.setChecked(process_hr_state)
         
         b1 = QtWidgets.QHBoxLayout()
         sv = QtWidgets.QPushButton("保存模板"); sv.clicked.connect(self.save_tpl)
-        rl = QtWidgets.QPushButton("打开/编辑 rule.json"); rl.clicked.connect(self.open_rule_json)
+        rl = QtWidgets.QPushButton("编辑rule文件"); rl.clicked.connect(self.open_rule_json)
         fd = QtWidgets.QPushButton("查找 (Find)"); fd.clicked.connect(self.do_find)
         st = QtWidgets.QPushButton("下一步 (Next)"); st.clicked.connect(lambda: self.stack.setCurrentIndex(1))
         b1.addWidget(sv); b1.addWidget(rl); b1.addWidget(self.chk_process_hr); b1.addStretch(); b1.addWidget(fd); b1.addWidget(st)
