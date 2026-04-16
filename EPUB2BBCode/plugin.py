@@ -30,18 +30,17 @@ try:
 except ImportError:
     pass
 
+import lxml.html
+from lxml import etree
+
 # ========================================================
 # 修复跨设备/不同Sigil版本导致的 Qt platform plugin 冲突问题
-# 强制清除Sigil传递的Qt环境变量，让PyQt/PySide使用自带的platform plugins
 # ========================================================
 for _env_key in ['QT_PLUGIN_PATH', 'QT_QPA_PLATFORM_PLUGIN_PATH']:
     if _env_key in os.environ:
         del os.environ[_env_key]
 
-# ========================================================
-# 适配 Sigil 1.9+ 的终极兼容 Qt 导入逻辑
-# 不再依赖环境变量解析，直接按官方推荐顺序瀑布流探测最新绑定库
-# ========================================================
+# 动态加载 Qt 库
 try:
     from PySide6 import QtWidgets, QtCore, QtGui
 except ImportError:
@@ -58,24 +57,26 @@ class BBCodeConverter:
         self.nav_uid = ""
         self.nav_filename = ""
         self.skip_files = set()
-        self.toc_files = {}  # 独立记录目录页及其名称
-        self.spine_map = {}  # 记录文件对应的 OPF Spine 顺序索引，构建单向状态机防回溯
+        self.toc_files = {}
+        self.spine_map = {}
+
+        # 高频复杂正则表达式预编译缓存
+        self.PAT_A_TAG = re.compile(r'<a[^>]*href=["\']#([^"\']+)["\'][^>]*>(.*?)</a>', flags=re.I|re.S)
+        self.PAT_RUBY = re.compile(r'<ruby[^>]*>(.*?)</ruby>', flags=re.I|re.S)
+        self.PAT_RUBY_RT = re.compile(r'<rt[^>]*>(.*?)</rt>', flags=re.I|re.S)
+        self.PAT_IMG = re.compile(r'<(?:img|image)[^>]+(?:src|href)=["\']([^"\']+)["\'][^>]*>', flags=re.I)
 
     def add_nav_title(self, title, href_full):
         if not title or not href_full: return
-        # 严格遵守要求：只定位xhtml，不识别后面的#id，避免匹配错误
         filename = os.path.basename(href_full.split('#')[0])
         title = title.strip(' \t\n\r\u3000')
         
-        # 【特权】封面处理：仅忽略标题匹配，保留页面正常内容处理
         if title in ["書封", "书封", "封面", "作者頁", "作者页", "書名頁", "书名页", "內彩", "封底", "彩頁", "彩页"]:
             print(f"  -> [识别-忽略] 发现封面标题: '{title}'，不将其纳入匹配库（但保留页面正文读取）")
             return
             
-        # 记录标题应该存在的目标文件的序号 (防回溯核心)
         target_idx = self.spine_map.get(filename, 9999)
         
-        # 【特权】目录与版权页
         if title in ["版權頁", "版权页"]:
             self.skip_files.add(filename)
             print(f"  -> [识别-剥离] 锁定特权页面并打上跳过标签: {filename} (类型: '{title}')")
@@ -94,19 +95,16 @@ class BBCodeConverter:
     def pre_scan(self):
         print("\n" + "="*50 + "\n【第一步：解析 OPF 导航与构建全局防逆流书脊地图】\n" + "="*50)
         try:
-            # 构建 manifest 映射以安全获取 href
             manifest_map = {}
             for m_uid, m_href, m_mime in self.bk.manifest_iter():
                 manifest_map[m_uid] = m_href
 
-            # 预先扫描书脊，构建防回溯时间轴
             for idx, spine_info in enumerate(self.bk.spine_iter()):
                 uid = spine_info[0]
                 href = manifest_map.get(uid, "")
                 if href:
                     self.spine_map[os.path.basename(href.split('#')[0])] = idx
 
-            # 【优化】使用 BeautifulSoup 替代脆弱的 XML 正则检索
             opf_html = self.bk.get_opf()
             soup = BeautifulSoup(opf_html, 'html.parser')
             
@@ -130,24 +128,21 @@ class BBCodeConverter:
                 nav_soup = BeautifulSoup(nav_html, 'html.parser')
                 
                 if self.nav_filename.lower().endswith('.ncx'):
-                    # NCX 目录解析
                     for navpoint in nav_soup.find_all('navpoint'):
                         text_tag = navpoint.find('text')
                         content_tag = navpoint.find('content')
                         if text_tag and content_tag and content_tag.has_attr('src'):
                             self.add_nav_title(text_tag.get_text(strip=True), content_tag['src'])
                 else:
-                    # HTML5 NAV 目录解析：隔离 <nav epub:type="toc"> 区块，屏蔽 landmarks 干扰
                     toc_nav = nav_soup.find('nav', attrs={'epub:type': 'toc'})
                     if not toc_nav:
-                        toc_nav = nav_soup # 兼容不规范的 epub
+                        toc_nav = nav_soup
                     
                     for a_tag in toc_nav.find_all('a', href=True):
                         self.add_nav_title(a_tag.get_text(strip=True), a_tag['href'])
             except Exception as e:
                 print(f"[!] 导航解析发生异常: {e}")
 
-        # 全局备用脚注（如果当页找不到，可以来这里找）
         try:
             print("[*] 开始使用 BeautifulSoup 提取全书备用脚注...")
             for text_info in self.bk.text_iter():
@@ -159,13 +154,11 @@ class BBCodeConverter:
                 content = self.bk.readfile(uid)
                 soup = BeautifulSoup(content, 'html.parser')
                 
-                # 1. 提取 <aside> 内部的 <li> 脚注
                 for aside in soup.find_all('aside'):
                     for li in aside.find_all('li', id=True):
                         txt = li.get_text(strip=True).strip(' \t\n\r\u3000')
                         if txt: self.footnote_map[li['id']] = txt
                         
-                # 2. 提取 class 包含 footnote 的块级脚注
                 for fn in soup.find_all(['p', 'div', 'span', 'li'], class_=re.compile(r'footnote', re.I), id=True):
                     txt = fn.get_text(strip=True).strip(' \t\n\r\u3000')
                     if txt: self.footnote_map[fn['id']] = txt
@@ -178,31 +171,22 @@ class BBCodeConverter:
         href = href or ""
         filename = os.path.basename(href.split('#')[0])
         
-        # 激活条件：标题所在文件一致，且尚未被匹配，且当前文件 OPF Index 必须大等于其目标 Index
         expected_titles = [nt for nt in self.nav_titles if nt['filename'] == filename and not nt['matched'] and current_idx >= nt['target_idx']]
 
         print(f"\n--- 【文件处理开始】: {filename} (当页绝对索引: {current_idx}) ---")
         if expected_titles:
             print(f"  [监测-标题池] 本页准许并激活匹配 {len(expected_titles)} 个标题。")
 
-        # 侦测表格标签并在控制台警告 (不作处理)
         if re.search(r'<table\b', html, flags=re.I):
             print(f"  [警告] 侦测到表格标签 <table>，当前版本不支持表格转换，请注意输出排版。")
 
-        # ========================================================
-        # 1. 基础间隙清理 (不碰全角空格)
-        # ========================================================
         html = re.sub(r'>\s*\n\s*<', '><', html)
 
-        # ========================================================
-        # 2. 注释（脚注）精准拉取与销毁系统
-        # ========================================================
         print(f"  [处理-注释] 开始扫描当页脚注定义...")
         local_footnotes = {}
         del_blocks = []
         
-        # 提取所有包含 注/註/* 的 <a> 标签
-        a_tags = re.finditer(r'<a[^>]*href=["\']#([^"\']+)["\'][^>]*>(.*?)</a>', html, flags=re.I|re.S)
+        a_tags = self.PAT_A_TAG.finditer(html)
         
         for m in a_tags:
             link_pos = m.start()
@@ -259,7 +243,7 @@ class BBCodeConverter:
             else:
                 return original_a_tag
                 
-        html, fn_count = re.subn(r'<a[^>]*href=["\']#([^"\']+)["\'][^>]*>.*?</a>', footnote_link_replacer, html, flags=re.I|re.S)
+        html, fn_count = self.PAT_A_TAG.subn(footnote_link_replacer, html)
         if fn_count > 0:
             print(f"  [处理-注释] 发现并内联了 {fn_count} 处脚注引用。")
 
@@ -267,98 +251,135 @@ class BBCodeConverter:
         if del_count > 0:
             print(f"  [处理-注释销毁执行] 成功清除了 {del_count} 个被标记的底部注释区块。")
 
-        # ========================================================
-        # 3. 清理空标签
-        # ========================================================
         while True:
             new_html = re.sub(r'<([a-z0-9]+)[^>]*>\s*</\1>', '', html, flags=re.I)
             if new_html == html: break
             html = new_html
 
-        # ========================================================
-        # 5. Ruby 处理
-        # ========================================================
         html = re.sub(r'</rt>\s+</ruby>', '</rt></ruby>', html, flags=re.I)
         def ruby_repl(m):
             inner = m.group(1)
-            rts = "".join([re.sub(r'<[^>]+>', '', c) for c in re.findall(r'<rt[^>]*>(.*?)</rt>', inner, flags=re.I|re.S)])
+            rts = "".join([re.sub(r'<[^>]+>', '', c) for c in self.PAT_RUBY_RT.findall(inner)])
             base = re.sub(r'<(?:rp|rt)[^>]*>.*?</(?:rp|rt)>', '', inner, flags=re.I|re.S)
             base = re.sub(r'<[^>]+>', '', base).replace('\n', '')
             return f"[ruby={rts}]{base}[/ruby]"
-        html, r_count = re.subn(r'<ruby[^>]*>(.*?)</ruby>', ruby_repl, html, flags=re.I | re.S)
+            
+        html, r_count = self.PAT_RUBY.subn(ruby_repl, html)
         if r_count > 0: print(f"  [处理-Ruby] 成功转换了 {r_count} 处 Ruby 注音。")
 
-        # ========================================================
-        # 6. 图片与基础替换 (含 <br/> 强力保护机制)
-        # ========================================================
         html, b_count = re.subn(r'<p[^>]*>(.*?)</p>', lambda m: "<p>" + re.sub(r'<br\s*/?>', '[SYS_BR_SPACE]', m.group(1), flags=re.I) + "</p>", html, flags=re.S|re.I)
         
         def img_repl(m):
             src = os.path.basename(m.group(1))
             return "" if src in deleted_imgs else img_map.get(src, f"__IMG_MARKER__{src}__")
-        html, i_count = re.subn(r'<(?:img|image)[^>]+(?:src|href)=["\']([^"\']+)["\'][^>]*>', img_repl, html, flags=re.I)
+            
+        html, i_count = self.PAT_IMG.subn(img_repl, html)
         if i_count > 0: print(f"  [处理-图片] 成功映射了 {i_count} 张图片。")
 
         html = re.sub(r'<hr[^>]*>', '\n[SYS_HR_MARKER]\n', html, flags=re.I)
 
-        # 【多阶样式统一引擎】完全保留原有的强大匹配规则
-        while True:
-            m = re.search(r'<(span|b|strong|i|em|s|p|div|h[1-6])\b([^>]*)>((?:(?!</?(?:span|b|strong|i|em|s|p|div|h[1-6])\b).)*?)</\1>', html, flags=re.S|re.I)
-            if not m: break
-            
-            tag = m.group(1).lower()
-            attrs = m.group(2).lower()
-            inner = m.group(3)
-            
-            repl = inner
-            
-            if tag in ('b', 'strong'):
-                repl = f"[b]{repl}[/b]"
-            elif tag in ('i', 'em'):
-                repl = f"[i]{repl}[/i]"
-            elif tag == 's':
-                repl = f"[s]{repl}[/s]"
+        # ========================================================
+        # 【多阶样式统一引擎 - LXML DOM 树解析重构版】
+        # 彻底抛弃低效嵌套正则，基于内存树底向上解析，性能飞跃并杜绝回溯死循环
+        # ========================================================
+        if html.strip():
+            try:
+                root = lxml.html.fromstring(f"<div id='__sys_root__'>{html}</div>")
                 
-            if re.search(r'\b(bold|gfont)\b', attrs):
-                repl = f"[b]{repl}[/b]"
-            if re.search(r'\bitalic\b', attrs):
-                repl = f"[i]{repl}[/i]"
-            if re.search(r'\b(line-through|strike)\b', attrs):
-                repl = f"[s]{repl}[/s]"
-            if re.search(r'\balign-center\b', attrs):
-                repl = f"[center]{repl}[/center]"
-            if re.search(r'\b(align-left|align-start)\b', attrs):
-                repl = f"[left]{repl}[/left]"
-            if re.search(r'\b(align-right|align-end)\b', attrs):
-                repl = f"[right]{repl}[/right]"
-                
-            if re.search(r'\bstart-6em\b', attrs):
-                repl = re.sub(r'<[^>]+>', '', repl).strip(' \t\n\r\u3000')
-                repl = re.sub(r'\s+', ' ', repl)
-                repl = f"[segmentation]{repl}[/segmentation]"
-
-            if tag in ('p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
-                if tag == 'div' and not re.search(r'<sys_[^>]+>', inner, re.I):
-                    if inner.strip():
-                        log_text = re.sub(r'<[^>]+>|\[.*?\]', '', inner).strip(' \t\n\r\u3000')
-                        if not log_text: log_text = inner.strip()
-                        if len(log_text) > 20: log_text = log_text[:20] + '...'
-                        print(f"  [检查提醒] 发现直接包裹文本的 div 标签，已在末尾追加换行: '{log_text}'")
-                        repl += '\n'
+                # 安全包裹函数：在不破坏节点原有层级的前提下，在元素首尾追加 BBCode 标识符
+                def wrap_contents(el, start_tag, end_tag):
+                    if el.text:
+                        el.text = start_tag + el.text
+                    else:
+                        el.text = start_tag
                         
-                html = html[:m.start()] + f"<sys_{tag}>{repl}</sys_{tag}>" + html[m.end():]
-            else:
-                html = html[:m.start()] + repl + html[m.end():]
+                    if len(el) > 0:
+                        last_child = el[-1]
+                        if last_child.tail:
+                            last_child.tail += end_tag
+                        else:
+                            last_child.tail = end_tag
+                    else:
+                        el.text += end_tag
 
-        # ========================================================
-        # 7. 剥离块级标签
-        # ========================================================
-        html = re.sub(r'</sys_p>|</sys_h[1-6]>|</li>|<br\s*/?>', '\n', html, flags=re.I)
+                # 核心解析：使用 reversed 实现从最内层向最外层的倒序（Bottom-Up）遍历
+                for el in reversed(list(root.iter())):
+                    if el.tag == 'div' and el.get('id') == '__sys_root__':
+                        continue
+                    if not isinstance(el.tag, str):
+                        continue
+                        
+                    tag = el.tag.lower()
+                    if tag not in ('span', 'b', 'strong', 'i', 'em', 's', 'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+                        continue
+                        
+                    # 清理因源码排版产生的多余换行，防止 BBCode 标签产生跨行包裹错误
+                    if el.text:
+                        el.text = el.text.lstrip('\r\n')
+                    if len(el) > 0:
+                        last_child = el[-1]
+                        if last_child.tail:
+                            last_child.tail = last_child.tail.rstrip('\r\n')
+                    elif el.text:
+                        el.text = el.text.rstrip('\r\n')
+                        
+                    attrs_str = " ".join([f"{k}='{v}'" for k, v in el.attrib.items()]).lower()
+                    
+                    if tag in ('b', 'strong'):
+                        wrap_contents(el, '[b]', '[/b]')
+                    elif tag in ('i', 'em'):
+                        wrap_contents(el, '[i]', '[/i]')
+                    elif tag == 's':
+                        wrap_contents(el, '[s]', '[/s]')
+                        
+                    if re.search(r'(bold|gfont|font-weight:\s*bold)', attrs_str):
+                        wrap_contents(el, '[b]', '[/b]')
+                    if re.search(r'(italic|font-style:\s*italic)', attrs_str):
+                        wrap_contents(el, '[i]', '[/i]')
+                    if re.search(r'(line-through|strike|text-decoration:\s*line-through)', attrs_str):
+                        wrap_contents(el, '[s]', '[/s]')
+                    if re.search(r'(align-center|text-center|text-align:\s*center)', attrs_str):
+                        wrap_contents(el, '[center]', '[/center]')
+                    if re.search(r'(align-left|align-start|text-left|text-start|text-align:\s*(left|start))', attrs_str):
+                        wrap_contents(el, '[left]', '[/left]')
+                    if re.search(r'(align-right|align-end|text-right|text-end|text-align:\s*(right|end))', attrs_str):
+                        wrap_contents(el, '[right]', '[/right]')
+                        
+                    if re.search(r'start-6em', attrs_str):
+                        inner_text = "".join(el.itertext()).strip(' \t\n\r\u3000')
+                        inner_text = re.sub(r'\s+', ' ', inner_text)
+                        for child in list(el):
+                            el.remove(child)
+                        el.text = f"[segmentation]{inner_text}[/segmentation]"
+
+                    if tag in ('p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+                        sys_tag = tag
+                        
+                        if tag == 'div':
+                            # 检查是否包含系统级的块级标签（因为是从内向外处理，子块级已被更名为 sys_ 系列）
+                            has_sys_child = any(isinstance(c.tag, str) and c.tag.startswith('sys_') for c in el.iterdescendants())
+                            if not has_sys_child:
+                                log_text = "".join(el.itertext()).strip(' \t\n\r\u3000')
+                                log_text = re.sub(r'\[.*?\]', '', log_text)
+                                if log_text:
+                                    if len(log_text) > 20: log_text = log_text[:20] + '...'
+                                    print(f"  [检查提醒] 发现直接包裹文本的 div 标签，已转换换行标记: '{log_text}'")
+                                    sys_tag = 'div_nl'
+                                
+                        el.tag = f"sys_{sys_tag}"
+                        el.attrib.clear()
+                    else:
+                        # 行内标签仅剥离外壳，将其处理完毕的 BBCode 结构无缝并入父级或前后兄弟节点的字符流中
+                        el.drop_tag()
+                        
+                # 重新序列化提取处理完毕的内部 HTML 结构
+                html = (root.text or "") + "".join(etree.tostring(child, encoding='unicode', method='html') for child in root)
+            except Exception as e:
+                print(f"  [致命警告] LXML 引擎解析当前页面崩溃，尝试跳过样式处理: {e}")
+
+        html = re.sub(r'</sys_p>|</sys_h[1-6]>|</sys_div_nl>|</li>|<br\s*/?>', '\n', html, flags=re.I)
         text = re.sub(r'<[^>]+>', '', html)
 
-        # ========================================================
-        # 8. 单向防回溯智能标题侦测与捕获
-        # ========================================================
         raw_lines = text.split('\n')
         marked_lines = []
 
@@ -462,12 +483,13 @@ class MainDialog(QtWidgets.QDialog):
         
         self.book_title = "Export"
         try:
-            # 【优化】使用 BeautifulSoup 精准拉取 OPF 书名，规避正则带来的乱入干扰
-            opf_html = bk.get_opf()
-            soup = BeautifulSoup(opf_html, 'html.parser')
-            title_tag = soup.find('dc:title', id='title') or soup.find('title', id='title') or soup.find('dc:title') or soup.find('title')
-            if title_tag: 
-                raw_title = title_tag.get_text(strip=True)
+            # 【修复】回归精准正则解析，规避 bs4 html.parser 对 XML 命名空间(dc:title)的吞标签问题
+            opf = bk.get_opf()
+            t = re.search(r'<(?:dc:)?title[^>]*id=["\']title["\'][^>]*>(.*?)</(?:dc:)?title>', opf, re.I|re.S)
+            if not t: 
+                t = re.search(r'<(?:dc:)?title[^>]*>(.*?)</(?:dc:)?title>', opf, re.I|re.S)
+            if t: 
+                raw_title = re.sub(r'<[^>]+>', '', t.group(1)).strip()
                 self.book_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title)
         except Exception as e: 
             print(f"[!] 书名读取异常: {e}")
@@ -476,7 +498,7 @@ class MainDialog(QtWidgets.QDialog):
 
     def init_ui(self):
         self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowContextHelpButtonHint)
-        self.setWindowTitle("EPUB → BBCode TXT (基于 BeautifulSoup 的多核智能升级版)")
+        self.setWindowTitle("EPUB → BBCode TXT (多核引擎预编译提速版)")
         self.resize(950, 850)
         self.layout = QtWidgets.QVBoxLayout(self)
         self.stack = QtWidgets.QStackedWidget()
