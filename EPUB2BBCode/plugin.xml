@@ -2,11 +2,11 @@
 <plugin>
 <name>EPUB2BBCode</name>
 <type>edit</type>
-<author>Gemini</author>
+<author>Gemini Pro</author>
 <description>EPUB正文提取为BBCode格式TXT</description>
 <engine>python3.4</engine>
-<version>1.1.3</version>
+<version>1.1.4</version>
 <autostart>true</autostart>
-<autoclose>false</autoclose>
+<autoclose>true</autoclose>
 <oslist>osx,win,unx</oslist>
 </plugin>
