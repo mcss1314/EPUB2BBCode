@@ -355,7 +355,7 @@ class BBCodeConverter:
                 marked_lines.append(line)
                 continue
 
-            # 【修复点】忽略（剔除）本行内的图片标记，仅提取纯净文字用于标题比对
+            # 忽略（剔除）本行内的图片标记，仅提取纯净文字用于标题比对
             temp_line = re.sub(r'\[img\].*?\[/img\]', '', stripped_line, flags=re.I)
             temp_line = re.sub(r'__IMG_MARKER__.*?__', '', temp_line)
 
@@ -466,9 +466,8 @@ class MainDialog(QtWidgets.QDialog):
         self.init_ui()
 
     def init_ui(self):
-        # 移除窗口右上角的上下文帮助问号按钮
         self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowContextHelpButtonHint)
-        self.setWindowTitle("EPUB → BBCode TXT (空间矩阵引擎·原生界面日志强化版)")
+        self.setWindowTitle("EPUB → BBCode TXT")
         self.resize(950, 850)
         self.layout = QtWidgets.QVBoxLayout(self)
         self.stack = QtWidgets.QStackedWidget()
@@ -540,9 +539,9 @@ class MainDialog(QtWidgets.QDialog):
                 except: 
                     img_lbl.setText("ERR")
                 
-                # 【保留】文件名称宽度仍为目前的四分之三 (约176px)，取消换行，双击弹窗
+                # 文件名称宽度约150px，双击弹窗
                 lbl_name = ClickableFilenameLabel(name)
-                lbl_name.setFixedWidth(176)
+                lbl_name.setFixedWidth(150)
                 lbl_name.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
                 
                 edit = QtWidgets.QLineEdit()
