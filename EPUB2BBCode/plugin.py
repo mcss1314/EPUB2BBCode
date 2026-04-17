@@ -188,7 +188,7 @@ class BBCodeConverter:
         html = re.sub(r'>\s*\n\s*<', '><', html)
 
         # ========================================================
-        # 【全重构】局部注释（脚注）精准拉取与销毁 - 彻底告别正则提取，切换为 DOM 解析
+        # 局部注释（脚注）精准拉取与销毁
         # ========================================================
         soup = BeautifulSoup(html, 'html.parser')
         a_tags = soup.find_all('a', href=re.compile(r'^#.+'))
@@ -200,13 +200,11 @@ class BBCodeConverter:
             a_text_raw = a_tag.get_text(strip=True).strip(' \t\n\r\u3000[]()【】')
             
             if '注' in a_text_raw or '註' in a_text_raw or '*' in a_text_raw or a_text_raw.isdigit():
-                target_id = a_tag['href'][1:] # 移除前面的 '#'
-                
-                # 首先在当页尝试寻找注释本体
+                target_id = a_tag['href'][1:]
                 target_el = soup.find(id=target_id)
+                
                 if target_el:
                     block_container = target_el
-                    # 向外寻找块级包裹，防止提取到行内裸露文本
                     if target_el.name not in ['p', 'div', 'li', 'aside', 'section']:
                         parent_block = target_el.find_parent(['p', 'div', 'li', 'aside', 'section'])
                         if parent_block:
@@ -218,19 +216,16 @@ class BBCodeConverter:
                     txt = re.sub(r'^返回正文\s*', '', txt)
                     txt = re.sub(r'^' + re.escape(a_text_raw) + r'[:：\s]*', '', txt)
                     
-                    # 使用 BS4 直接原地替换节点为纯文本字符串
                     a_tag.replace_with(f"（{txt}）")
                     del_blocks.add(block_container)
                     fn_count += 1
                     print(f"    [匹配-注释] 成功拉取注释: #{target_id}")
                     
-                # 本地未找到，则退而求其次在全书备用表中寻找
                 elif target_id in self.footnote_map:
                     a_tag.replace_with(f"（{self.footnote_map[target_id]}）")
                     fn_count += 1
                     print(f"    [匹配-注释] 从全局备用拉取: #{target_id}")
 
-        # 物理销毁已提取出的注释块，避免排版尾部冗余
         for block in del_blocks:
             if block.parent:
                 block.extract()
@@ -238,13 +233,13 @@ class BBCodeConverter:
         if del_blocks:
             print(f"  [处理-注释销毁执行] 成功清除了 {len(del_blocks)} 个底部注释区块。")
 
-        # 序列化为字符串，交接给后续轻量正则流水线
         html = str(soup)
 
         # ========================================================
         # 常规清理与基础替换
         # ========================================================
         while True:
+            # 取消空标签白名单，空分行符也将被照常物理清理
             new_html = re.sub(r'<([a-z0-9]+)[^>]*>\s*</\1>', '', html, flags=re.I)
             if new_html == html: break
             html = new_html
@@ -260,7 +255,8 @@ class BBCodeConverter:
         html, r_count = self.PAT_RUBY.subn(ruby_repl, html)
         if r_count > 0: print(f"  [处理-Ruby] 成功转换了 {r_count} 处 Ruby 注音。")
 
-        html, b_count = re.subn(r'<p[^>]*>(.*?)</p>', lambda m: "<p>" + re.sub(r'<br\s*/?>', '[SYS_BR_SPACE]', m.group(1), flags=re.I) + "</p>", html, flags=re.S|re.I)
+        # 保留 <p> 标签的原有属性，避免 class="start-6em" 等样式被误擦除
+        html, b_count = re.subn(r'(<p[^>]*>)(.*?)(</p>)', lambda m: m.group(1) + re.sub(r'<br\s*/?>', '[SYS_BR_SPACE]', m.group(2), flags=re.I) + m.group(3), html, flags=re.S|re.I)
         
         def img_repl(m):
             src = os.path.basename(m.group(1))
@@ -273,14 +269,14 @@ class BBCodeConverter:
             html = re.sub(r'<hr[^>]*>', '\n[SYS_HR_MARKER]\n', html, flags=re.I)
 
         # ========================================================
-        # 【多阶样式统一引擎 - LXML DOM 树解析重构版】
-        # 彻底抛弃低效嵌套正则，基于内存树底向上解析，性能飞跃并杜绝回溯死循环
+        # 【多阶样式统一引擎 - LXML DOM 树解析】
+        # 基于内存树底向上解析，性能飞跃并杜绝回溯死循环
         # ========================================================
         if html.strip():
             try:
                 root = lxml.html.fromstring(f"<div id='__sys_root__'>{html}</div>")
                 
-                # 安全包裹函数：在不破坏节点原有层级的前提下，在元素首尾追加 BBCode 标识符
+                # 安全包裹函数
                 def wrap_contents(el, start_tag, end_tag):
                     if el.text:
                         el.text = start_tag + el.text
@@ -296,7 +292,7 @@ class BBCodeConverter:
                     else:
                         el.text += end_tag
 
-                # 核心解析：使用 reversed 实现从最内层向最外层的倒序（Bottom-Up）遍历
+                # 自底向上遍历
                 for el in reversed(list(root.iter())):
                     if el.tag == 'div' and el.get('id') == '__sys_root__':
                         continue
@@ -307,7 +303,7 @@ class BBCodeConverter:
                     if tag not in ('span', 'b', 'strong', 'i', 'em', 's', 'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
                         continue
                         
-                    # 清理因源码排版产生的多余换行，防止 BBCode 标签产生跨行包裹错误
+                    # 清理因源码排版产生的多余换行
                     if el.text:
                         el.text = el.text.lstrip('\r\n')
                     if len(el) > 0:
@@ -349,8 +345,13 @@ class BBCodeConverter:
                     if tag in ('p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
                         sys_tag = tag
                         
+                        # 【新增检测】如果 p 标签内部包含图片印记，给出安全警告但不进行阻断处理
+                        if tag == 'p':
+                            p_text_content = "".join(el.itertext())
+                            if '__IMG_MARKER__' in p_text_content:
+                                print(f"  [警告] 侦测到 <p> 标签内嵌套了图片元素，这可能导致非预期的段落换行缩进，系统已跳过结构干预。")
+
                         if tag == 'div':
-                            # 检查是否包含系统级的块级标签
                             has_sys_child = any(isinstance(c.tag, str) and (c.tag.startswith('sys_') or c.tag.lower() in ('svg', 'table', 'img', 'image')) for c in el.iterdescendants())
                             if not has_sys_child:
                                 log_text = "".join(el.itertext()).strip(' \t\n\r\u3000')
@@ -366,10 +367,8 @@ class BBCodeConverter:
                         el.tag = f"sys_{sys_tag}"
                         el.attrib.clear()
                     else:
-                        # 行内标签仅剥离外壳，将其处理完毕的 BBCode 结构无缝并入父级或前后兄弟节点的字符流中
                         el.drop_tag()
                         
-                # 重新序列化提取处理完毕的内部 HTML 结构
                 html = (root.text or "") + "".join(etree.tostring(child, encoding='unicode', method='html') for child in root)
             except Exception as e:
                 print(f"  [致命警告] LXML 引擎解析当前页面崩溃，尝试跳过样式处理: {e}")
@@ -380,7 +379,6 @@ class BBCodeConverter:
         raw_lines = text.split('\n')
         marked_lines = []
 
-        # (提示删除：不再打印 "开始进入核心按行扫描...")
         for line_num, line in enumerate(raw_lines, 1):
             stripped_line = line.strip(' \t\r\n\u3000')
             if not stripped_line:
@@ -480,7 +478,6 @@ class MainDialog(QtWidgets.QDialog):
         
         self.book_title = "Export"
         try:
-            # 【修复】彻底使用 BeautifulSoup XML引擎解析，永久规避正则表达式的提取不稳定性
             opf = bk.get_opf()
             soup = BeautifulSoup(opf, 'xml')
             title_tag = soup.find('dc:title', id='title') or soup.find('title', id='title') or soup.find('dc:title') or soup.find('title')
@@ -758,6 +755,7 @@ class MainDialog(QtWidgets.QDialog):
             final = re.sub(r'\[segmentation\](.*?)\[/segmentation\]', r'[center][b]\1[/b][/center]', final)
 
             # --- BBCode标签内层换行符外推逻辑 ---
+            # 针对 <div> 等块级标签包裹 BBCode 导致的 [right]\n文本\n[/right] 错位问题，将其安全推至标签外
             tags_to_fix = r'b|i|s|center|left|right'
             while True:
                 prev_final = final
