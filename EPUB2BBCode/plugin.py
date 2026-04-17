@@ -33,10 +33,25 @@ _vendor_dir = os.path.join(_plugin_dir, "vendor")
 if os.path.exists(_vendor_dir) and _vendor_dir not in sys.path:
     sys.path.insert(0, _vendor_dir)
 
-# 统一使用结构化解析器，彻底摒弃正则 Fallback
-from bs4 import BeautifulSoup
-import lxml.html
-from lxml import etree
+# ========================================================
+# 跨平台依赖检查：如果不存在 BS4 或 LXML 不会崩溃，而是记录并发出预警
+# ========================================================
+MISSING_DEPS = []
+
+try:
+    from bs4 import BeautifulSoup
+    HAS_BS4 = True
+except ImportError:
+    HAS_BS4 = False
+    MISSING_DEPS.append("BeautifulSoup4 (bs4)")
+
+try:
+    import lxml.html
+    from lxml import etree
+    HAS_LXML = True
+except ImportError:
+    HAS_LXML = False
+    MISSING_DEPS.append("lxml")
 
 # ========================================================
 # 修复跨设备/不同Sigil版本导致的 Qt platform plugin 冲突问题
@@ -111,11 +126,18 @@ class BBCodeConverter:
 
             opf_html = self.bk.get_opf()
             
-            # 使用 XML 解析器完美处理 OPF 命名空间
-            soup = BeautifulSoup(opf_html, 'xml')
-            nav_item = soup.find('item', properties=lambda x: x and 'nav' in x.lower())
-            m_toc = soup.find('spine')
-            self.nav_uid = nav_item.get('id') if nav_item else (m_toc.get('toc') if m_toc and m_toc.get('toc') else "toc")
+            # 【自动降级机制】支持 BS4 则使用 BS4，否则回退至高稳定性正则
+            if HAS_BS4:
+                soup = BeautifulSoup(opf_html, 'xml')
+                nav_item = soup.find('item', properties=lambda x: x and 'nav' in x.lower())
+                m_toc = soup.find('spine')
+                self.nav_uid = nav_item.get('id') if nav_item else (m_toc.get('toc') if m_toc and m_toc.get('toc') else "toc")
+            else:
+                m_nav = re.search(r'<item[^>]*id=["\']([^"\']+)["\'][^>]*properties=["\'][^"\']*nav[^"\']*["\']', opf_html, re.I)
+                if not m_nav:
+                    m_nav = re.search(r'<item[^>]*properties=["\'][^"\']*nav[^"\']*["\'][^>]*id=["\']([^"\']+)["\']', opf_html, re.I)
+                m_toc = re.search(r'<spine[^>]*toc=["\']([^"\']+)["\']', opf_html, re.I)
+                self.nav_uid = m_nav.group(1) if m_nav else (m_toc.group(1) if m_toc else "toc")
                 
             for uid, href, mime in self.bk.manifest_iter():
                 if uid == self.nav_uid:
@@ -128,27 +150,45 @@ class BBCodeConverter:
         if self.nav_uid:
             try:
                 nav_html = self.bk.readfile(self.nav_uid)
-                print("[*] 开始使用 BeautifulSoup 从导航中提取预设标题...")
-                nav_soup = BeautifulSoup(nav_html, 'html.parser')
                 
-                if self.nav_filename.lower().endswith('.ncx'):
-                    for navpoint in nav_soup.find_all('navpoint'):
-                        text_tag = navpoint.find('text')
-                        content_tag = navpoint.find('content')
-                        if text_tag and content_tag and content_tag.has_attr('src'):
-                            self.add_nav_title(text_tag.get_text(strip=True), content_tag['src'])
-                else:
-                    toc_nav = nav_soup.find('nav', attrs={'epub:type': 'toc'})
-                    if not toc_nav:
-                        toc_nav = nav_soup
+                if HAS_BS4:
+                    print("[*] 开始使用 BeautifulSoup 从导航中提取预设标题...")
+                    nav_soup = BeautifulSoup(nav_html, 'html.parser')
                     
-                    for a_tag in toc_nav.find_all('a', href=True):
-                        self.add_nav_title(a_tag.get_text(strip=True), a_tag['href'])
+                    if self.nav_filename.lower().endswith('.ncx'):
+                        for navpoint in nav_soup.find_all('navpoint'):
+                            text_tag = navpoint.find('text')
+                            content_tag = navpoint.find('content')
+                            if text_tag and content_tag and content_tag.has_attr('src'):
+                                self.add_nav_title(text_tag.get_text(strip=True), content_tag['src'])
+                    else:
+                        toc_nav = nav_soup.find('nav', attrs={'epub:type': 'toc'})
+                        if not toc_nav:
+                            toc_nav = nav_soup
+                        
+                        for a_tag in toc_nav.find_all('a', href=True):
+                            self.add_nav_title(a_tag.get_text(strip=True), a_tag['href'])
+                else:
+                    print("[*] 开始使用正则从导航中提取预设标题...")
+                    toc_block = re.search(r'(<nav[^>]*epub:type=["\']toc["\'][^>]*>.*?</nav>)', nav_html, flags=re.I|re.S)
+                    if toc_block:
+                        nav_html = toc_block.group(1)
+                        
+                    if self.nav_filename.lower().endswith('.ncx'):
+                        for m in re.finditer(r'<navPoint[^>]*>.*?<text[^>]*>(.*?)</text>.*?<content[^>]*src=["\']([^"\']+)["\']', nav_html, flags=re.S|re.I):
+                            self.add_nav_title(re.sub(r'<[^>]+>', '', m.group(1)), m.group(2))
+                    else:
+                        for m in re.finditer(r'<a[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', nav_html, flags=re.I|re.S):
+                            self.add_nav_title(re.sub(r'<[^>]+>', '', m.group(2)), m.group(1))
             except Exception as e:
                 print(f"[!] 导航解析发生异常: {e}")
 
         try:
-            print("[*] 开始使用 BeautifulSoup 提取全书备用脚注...")
+            if HAS_BS4:
+                print("[*] 开始使用 BeautifulSoup 提取全书备用脚注...")
+            else:
+                print("[*] 开始使用正则提取全书备用脚注...")
+                
             for text_info in self.bk.text_iter():
                 uid, href = text_info[0], text_info[1] if len(text_info)>1 else ""
                 filename = os.path.basename(href or "")
@@ -156,16 +196,25 @@ class BBCodeConverter:
                     continue
                 
                 content = self.bk.readfile(uid)
-                soup = BeautifulSoup(content, 'html.parser')
                 
-                for aside in soup.find_all('aside'):
-                    for li in aside.find_all('li', id=True):
-                        txt = li.get_text(strip=True).strip(' \t\n\r\u3000')
-                        if txt: self.footnote_map[li.get('id')] = txt
-                        
-                for fn in soup.find_all(['p', 'div', 'span', 'li'], class_=re.compile(r'footnote', re.I), id=True):
-                    txt = fn.get_text(strip=True).strip(' \t\n\r\u3000')
-                    if txt: self.footnote_map[fn.get('id')] = txt
+                if HAS_BS4:
+                    soup = BeautifulSoup(content, 'html.parser')
+                    for aside in soup.find_all('aside'):
+                        for li in aside.find_all('li', id=True):
+                            txt = li.get_text(strip=True).strip(' \t\n\r\u3000')
+                            if txt: self.footnote_map[li.get('id')] = txt
+                            
+                    for fn in soup.find_all(['p', 'div', 'span', 'li'], class_=re.compile(r'footnote', re.I), id=True):
+                        txt = fn.get_text(strip=True).strip(' \t\n\r\u3000')
+                        if txt: self.footnote_map[fn.get('id')] = txt
+                else:
+                    for aside_m in re.finditer(r'<aside[^>]*>(.*?)</aside>', content, re.S|re.I):
+                        for li_m in re.finditer(r'<li[^>]*id=["\']([^"\']+)["\'][^>]*>(.*?)</li>', aside_m.group(1), re.S|re.I):
+                            txt = re.sub(r'<[^>]+>', '', li_m.group(2)).strip(' \t\n\r\u3000')
+                            if txt: self.footnote_map[li_m.group(1)] = txt
+                    for fn_m in re.finditer(r'<[^>]+class=["\'][^"\']*footnote[^"\']*["\'][^>]*id=["\']([^"\']+)["\'][^>]*>(.*?)</(?:p|div|span|li)>', content, re.S|re.I):
+                        txt = re.sub(r'<[^>]+>', '', fn_m.group(2)).strip(' \t\n\r\u3000')
+                        if txt: self.footnote_map[fn_m.group(1)] = txt
                     
             print(f"[*] 共提取到 {len(self.footnote_map)} 个备用脚注。")
         except Exception as e:
@@ -190,50 +239,51 @@ class BBCodeConverter:
         # ========================================================
         # 局部注释（脚注）精准拉取与销毁
         # ========================================================
-        soup = BeautifulSoup(html, 'html.parser')
-        a_tags = soup.find_all('a', href=re.compile(r'^#.+'))
-        
-        del_blocks = set()
-        fn_count = 0
-        
-        for a_tag in a_tags:
-            a_text_raw = a_tag.get_text(strip=True).strip(' \t\n\r\u3000[]()【】')
+        if HAS_BS4:
+            soup = BeautifulSoup(html, 'html.parser')
+            a_tags = soup.find_all('a', href=re.compile(r'^#.+'))
             
-            if '注' in a_text_raw or '註' in a_text_raw or '*' in a_text_raw or a_text_raw.isdigit():
-                target_id = a_tag['href'][1:]
-                target_el = soup.find(id=target_id)
+            del_blocks = set()
+            fn_count = 0
+            
+            for a_tag in a_tags:
+                a_text_raw = a_tag.get_text(strip=True).strip(' \t\n\r\u3000[]()【】')
                 
-                if target_el:
-                    block_container = target_el
-                    if target_el.name not in ['p', 'div', 'li', 'aside', 'section']:
-                        parent_block = target_el.find_parent(['p', 'div', 'li', 'aside', 'section'])
-                        if parent_block:
-                            block_container = parent_block
-                            
-                    txt = block_container.get_text(strip=True).strip(' \t\n\r\u3000')
-                    txt = re.sub(r'\s+', ' ', txt)
-                    txt = re.sub(r'^[\^↵↑*※]\s*', '', txt)
-                    txt = re.sub(r'^返回正文\s*', '', txt)
-                    txt = re.sub(r'^' + re.escape(a_text_raw) + r'[:：\s]*', '', txt)
+                if '注' in a_text_raw or '註' in a_text_raw or '*' in a_text_raw or a_text_raw.isdigit():
+                    target_id = a_tag['href'][1:]
+                    target_el = soup.find(id=target_id)
                     
-                    a_tag.replace_with(f"（{txt}）")
-                    del_blocks.add(block_container)
-                    fn_count += 1
-                    print(f"    [匹配-注释] 成功拉取注释: #{target_id}")
+                    if target_el:
+                        block_container = target_el
+                        if target_el.name not in ['p', 'div', 'li', 'aside', 'section']:
+                            parent_block = target_el.find_parent(['p', 'div', 'li', 'aside', 'section'])
+                            if parent_block:
+                                block_container = parent_block
+                                
+                        txt = block_container.get_text(strip=True).strip(' \t\n\r\u3000')
+                        txt = re.sub(r'\s+', ' ', txt)
+                        txt = re.sub(r'^[\^↵↑*※]\s*', '', txt)
+                        txt = re.sub(r'^返回正文\s*', '', txt)
+                        txt = re.sub(r'^' + re.escape(a_text_raw) + r'[:：\s]*', '', txt)
+                        
+                        a_tag.replace_with(f"（{txt}）")
+                        del_blocks.add(block_container)
+                        fn_count += 1
+                        print(f"    [匹配-注释] 成功拉取注释: #{target_id}")
+                        
+                    elif target_id in self.footnote_map:
+                        a_tag.replace_with(f"（{self.footnote_map[target_id]}）")
+                        fn_count += 1
+                        print(f"    [匹配-注释] 从全局备用拉取: #{target_id}")
+
+            for block in del_blocks:
+                if block.parent:
+                    block.extract()
                     
-                elif target_id in self.footnote_map:
-                    a_tag.replace_with(f"（{self.footnote_map[target_id]}）")
-                    fn_count += 1
-                    print(f"    [匹配-注释] 从全局备用拉取: #{target_id}")
+            if del_blocks:
+                print(f"  [处理-注释销毁执行] 成功清除了 {len(del_blocks)} 个底部注释区块。")
 
-        for block in del_blocks:
-            if block.parent:
-                block.extract()
-                
-        if del_blocks:
-            print(f"  [处理-注释销毁执行] 成功清除了 {len(del_blocks)} 个底部注释区块。")
-
-        html = str(soup)
+            html = str(soup)
 
         # ========================================================
         # 常规清理与基础替换
@@ -271,8 +321,9 @@ class BBCodeConverter:
         # ========================================================
         # 【多阶样式统一引擎 - LXML DOM 树解析】
         # 基于内存树底向上解析，性能飞跃并杜绝回溯死循环
+        # 跨平台容灾：缺少 lxml 环境下该处理会安全跳过，防止整体系统瘫痪
         # ========================================================
-        if html.strip():
+        if HAS_LXML and html.strip():
             try:
                 root = lxml.html.fromstring(f"<div id='__sys_root__'>{html}</div>")
                 
@@ -401,9 +452,6 @@ class BBCodeConverter:
                     if not nt['matched']:
                         exp_norm = re.sub(r'\s+', '', nt['title'])
                         
-                        if len(norm_line) > 1 and (norm_line in exp_norm or exp_norm in norm_line):
-                             print(f"    [分析追踪 | 行 {line_num:03d}] 探测到包含标题核心字的行。目标:'{exp_norm}' | 剥离后提取为:'{norm_line}'")
-                        
                         if norm_line == exp_norm:
                             print(f"    ✅ [命中-成功锁定首出位 | 行 {line_num:03d}] 原文提取的 '{pure_text}' == 导航标题 '{nt['title']}'。已加锁。")
                             marked_lines.append(f"[SYS_TITLE]{nt['title']}[/SYS_TITLE]")
@@ -478,16 +526,36 @@ class MainDialog(QtWidgets.QDialog):
         
         self.book_title = "Export"
         try:
-            opf = bk.get_opf()
-            soup = BeautifulSoup(opf, 'xml')
-            title_tag = soup.find('dc:title', id='title') or soup.find('title', id='title') or soup.find('dc:title') or soup.find('title')
-            if title_tag: 
-                raw_title = title_tag.get_text(strip=True)
-                self.book_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title)
+            if HAS_BS4:
+                opf = bk.get_opf()
+                soup = BeautifulSoup(opf, 'xml')
+                title_tag = soup.find('dc:title', id='title') or soup.find('title', id='title') or soup.find('dc:title') or soup.find('title')
+                if title_tag: 
+                    raw_title = title_tag.get_text(strip=True)
+                    self.book_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title)
+            else:
+                opf = bk.get_opf()
+                t = re.search(r'<(?:dc:)?title[^>]*id=["\']title["\'][^>]*>(.*?)</(?:dc:)?title>', opf, re.I|re.S)
+                if not t: 
+                    t = re.search(r'<(?:dc:)?title[^>]*>(.*?)</(?:dc:)?title>', opf, re.I|re.S)
+                if t: 
+                    raw_title = re.sub(r'<[^>]+>', '', t.group(1)).strip()
+                    self.book_title = re.sub(r'[\\/:*?"<>|]', '_', raw_title)
         except Exception as e: 
             print(f"[!] 书名读取异常: {e}")
 
         self.init_ui()
+
+    def check_missing_deps(self):
+        if getattr(self, '_missing_deps_checked', False):
+            return
+        self._missing_deps_checked = True
+        if MISSING_DEPS:
+            msg = "跨平台环境提示：\n当前系统缺少以下依赖包，部分高级解析功能可能失效或遭遇降级：\n\n"
+            for dep in MISSING_DEPS:
+                msg += f" - {dep}\n"
+            msg += "\n请尝试将它们放置在插件内的 vendor 文件夹中，或通过系统 pip 安装。"
+            QtWidgets.QMessageBox.warning(self, "缺少必要依赖包", msg)
 
     def init_ui(self):
         self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowContextHelpButtonHint)
@@ -514,10 +582,19 @@ class MainDialog(QtWidgets.QDialog):
                     tpl = '\n'.join(lines)
             except: pass
         self.text_edit.setPlainText(tpl)
-        p1_layout.addWidget(QtWidgets.QLabel("步骤 1: 制作信息配置"))
+        
+        # 步骤 1 布局优化（内嵌进度条）
+        h1_layout = QtWidgets.QHBoxLayout()
+        h1_layout.addWidget(QtWidgets.QLabel("步骤 1: 制作信息配置"))
+        h1_layout.addStretch()
+        self.prog1 = QtWidgets.QProgressBar()
+        self.prog1.setFixedWidth(150)
+        self.prog1.setVisible(False)
+        h1_layout.addWidget(self.prog1)
+        p1_layout.addLayout(h1_layout)
         p1_layout.addWidget(self.text_edit)
         
-        self.chk_process_hr = QtWidgets.QCheckBox("转换<hr>标签")
+        self.chk_process_hr = QtWidgets.QCheckBox("转换分割线(<hr>)")
         self.chk_process_hr.setChecked(process_hr_state)
         
         b1 = QtWidgets.QHBoxLayout()
@@ -532,7 +609,16 @@ class MainDialog(QtWidgets.QDialog):
         # --- 页面 2 ---
         self.page2 = QtWidgets.QWidget()
         p2_layout = QtWidgets.QVBoxLayout(self.page2)
-        p2_layout.addWidget(QtWidgets.QLabel("步骤 2: 图床导入 (点击左侧框出现红色 × 以删除图片)"))
+        
+        # 步骤 2 布局优化（内嵌进度条）
+        h2_layout = QtWidgets.QHBoxLayout()
+        h2_layout.addWidget(QtWidgets.QLabel("步骤 2: 图床导入 (点击左侧框出现红色 × 以删除图片)"))
+        h2_layout.addStretch()
+        self.prog2 = QtWidgets.QProgressBar()
+        self.prog2.setFixedWidth(150)
+        self.prog2.setVisible(False)
+        h2_layout.addWidget(self.prog2)
+        p2_layout.addLayout(h2_layout)
         
         self.scroll = QtWidgets.QScrollArea()
         self.scroll_content = QtWidgets.QWidget()
@@ -607,6 +693,9 @@ class MainDialog(QtWidgets.QDialog):
         p2_layout.addLayout(b2)
         self.stack.addWidget(self.page2)
 
+        # 启动定时器，窗口加载完毕后检查缺失依赖并弹窗
+        QtCore.QTimer.singleShot(200, self.check_missing_deps)
+
     def open_rule_json(self):
         if not os.path.exists(self.rule_file):
             try:
@@ -634,8 +723,19 @@ class MainDialog(QtWidgets.QDialog):
     def do_find(self):
         raw = self.text_edit.toPlainText()
         txt = ""
-        for info in self.bk.text_iter(): 
+        text_items = list(self.bk.text_iter())
+        
+        self.prog1.setMaximum(len(text_items))
+        self.prog1.setValue(0)
+        self.prog1.setVisible(True)
+
+        for i, info in enumerate(text_items): 
             txt += re.sub(r'<[^>]+>', '', self.bk.readfile(info[0]))
+            self.prog1.setValue(i + 1)
+            QtWidgets.QApplication.processEvents()
+
+        self.prog1.setVisible(False)
+        
         def repl(m):
             k = m.group(1)
             r = re.search(re.escape(k) + r'(.*?)\n', txt)
@@ -675,12 +775,12 @@ class MainDialog(QtWidgets.QDialog):
             except Exception as e:
                 print(f"[!] rule.json 加载失败: {e}")
 
-        prog = None
         try:
             spine_list = list(self.bk.spine_iter())
-            prog = QtWidgets.QProgressDialog("执行单向合并重构引擎...", "取消", 0, len(spine_list), self)
-            prog.setWindowModality(QtCore.Qt.WindowModal)
-            prog.show()
+            
+            self.prog2.setMaximum(len(spine_list))
+            self.prog2.setValue(0)
+            self.prog2.setVisible(True)
 
             self.converter.pre_scan()
             info = self.text_edit.toPlainText().strip()
@@ -701,8 +801,8 @@ class MainDialog(QtWidgets.QDialog):
                 href = manifest_map.get(uid, "")
                 filename = os.path.basename(href.split('#')[0] if href else uid)
                 
-                if prog.wasCanceled(): return
-                prog.setValue(i); QtWidgets.QApplication.processEvents()
+                self.prog2.setValue(i + 1)
+                QtWidgets.QApplication.processEvents()
 
                 if filename == self.converter.nav_filename:
                     print(f"--- [物理剥离] 跳过合并官方导航文件: {filename} ---")
@@ -814,7 +914,7 @@ class MainDialog(QtWidgets.QDialog):
                     f.write("\n".join(console_logs))
             except: pass
             self.cf.setEnabled(True)
-            if prog: prog.close()
+            self.prog2.setVisible(False)
 
 def run(bk):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
