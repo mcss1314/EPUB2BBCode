@@ -190,7 +190,6 @@ class BBCodeConverter:
         # ========================================================
         # 【全重构】局部注释（脚注）精准拉取与销毁 - 彻底告别正则提取，切换为 DOM 解析
         # ========================================================
-        print(f"  [处理-注释] 开始使用 BeautifulSoup 扫描当页脚注定义...")
         soup = BeautifulSoup(html, 'html.parser')
         a_tags = soup.find_all('a', href=re.compile(r'^#.+'))
         
@@ -381,7 +380,7 @@ class BBCodeConverter:
         raw_lines = text.split('\n')
         marked_lines = []
 
-        print(f"  [处理-标题比对] 开始进入核心按行扫描...")
+        # (提示删除：不再打印 "开始进入核心按行扫描...")
         for line_num, line in enumerate(raw_lines, 1):
             stripped_line = line.strip(' \t\r\n\u3000')
             if not stripped_line:
@@ -495,7 +494,7 @@ class MainDialog(QtWidgets.QDialog):
 
     def init_ui(self):
         self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowContextHelpButtonHint)
-        self.setWindowTitle("EPUB → BBCode TXT Ver1.1.5")
+        self.setWindowTitle("EPUB → BBCode TXT Ver1.1.6")
         self.resize(950, 850)
         self.layout = QtWidgets.QVBoxLayout(self)
         self.stack = QtWidgets.QStackedWidget()
@@ -757,6 +756,25 @@ class MainDialog(QtWidgets.QDialog):
             final = re.sub(pattern_title, r'\n\n[center][b]\1[/b][/center]\n\n', final)
 
             final = re.sub(r'\[segmentation\](.*?)\[/segmentation\]', r'[center][b]\1[/b][/center]', final)
+
+            # --- BBCode标签内层换行符外推逻辑 ---
+            tags_to_fix = r'b|i|s|center|left|right'
+            while True:
+                prev_final = final
+                # 1. 将开标签后紧跟的换行符推到开标签之前
+                final = re.sub(r'(\[(' + tags_to_fix + r')\])([ \t\u3000]*\n+[ \t\u3000]*)', r'\3\1', final)
+                # 2. 将闭标签前紧跟的换行符推到闭标签之后
+                final = re.sub(r'([ \t\u3000]*\n+[ \t\u3000]*)(\[/(' + tags_to_fix + r')\])', r'\2\1', final)
+                if final == prev_final:
+                    break
+            
+            # 清理因外推或源码导致完全空置的 BBCode 标签 (如 [right][/right])
+            while True:
+                prev_final = final
+                final = re.sub(r'\[(' + tags_to_fix + r')\]\[/\1\]', '', final)
+                if final == prev_final:
+                    break
+            # ----------------------------------------
 
             final = re.sub(r'\n{3,}', '\n\n', final)
 
